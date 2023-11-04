@@ -5,6 +5,7 @@ import android.os.Build;
 import android.webkit.ValueCallback;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.webkit.WebViewCompat;
@@ -16,6 +17,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
@@ -23,14 +27,74 @@ import io.flutter.plugin.common.MethodChannel;
 public class InAppWebViewStatic implements MethodChannel.MethodCallHandler {
   
   protected static final String LOG_TAG = "InAppWebViewStatic";
+  private static String HOOK_WEBVIEW_TAG = "[hookWebView]";
   public MethodChannel channel;
   @Nullable
   public InAppWebViewFlutterPlugin plugin;
 
   public InAppWebViewStatic(final InAppWebViewFlutterPlugin plugin) {
+    Log.i(HOOK_WEBVIEW_TAG, "start hookWebView");
+    hookWebView();
+
     this.plugin = plugin;
     channel = new MethodChannel(plugin.messenger, "com.pichillilorenzo/flutter_inappwebview_static");
     channel.setMethodCallHandler(this);
+  }
+
+  public static void hookWebView(){
+    int sdkInt = Build.VERSION.SDK_INT;
+    try {
+        Class<?> factoryClass = Class.forName("android.webkit.WebViewFactory");
+        Field field = factoryClass.getDeclaredField("sProviderInstance");
+        field.setAccessible(true);
+        Object sProviderInstance = field.get(null);
+        if (sProviderInstance != null) {
+            Log.i(HOOK_WEBVIEW_TAG,"sProviderInstance isn't null");
+            return;
+        }
+
+        Method getProviderClassMethod;
+        if (sdkInt > 22) {
+            getProviderClassMethod = factoryClass.getDeclaredMethod("getProviderClass");
+        } else if (sdkInt == 22) {
+            getProviderClassMethod = factoryClass.getDeclaredMethod("getFactoryClass");
+        } else {
+            Log.i(HOOK_WEBVIEW_TAG,"Don't need to Hook WebView");
+            return;
+        }
+        getProviderClassMethod.setAccessible(true);
+        Class<?> factoryProviderClass = (Class<?>) getProviderClassMethod.invoke(factoryClass);
+        Class<?> delegateClass = Class.forName("android.webkit.WebViewDelegate");
+        Constructor<?> delegateConstructor = delegateClass.getDeclaredConstructor();
+        delegateConstructor.setAccessible(true);
+        if(sdkInt < 26){//低于Android O版本
+            Constructor<?> providerConstructor = factoryProviderClass.getConstructor(delegateClass);
+            if (providerConstructor != null) {
+                providerConstructor.setAccessible(true);
+                sProviderInstance = providerConstructor.newInstance(delegateConstructor.newInstance());
+            }
+        } else {
+            Field chromiumMethodName = factoryClass.getDeclaredField("CHROMIUM_WEBVIEW_FACTORY_METHOD");
+            chromiumMethodName.setAccessible(true);
+            String chromiumMethodNameStr = (String)chromiumMethodName.get(null);
+            if (chromiumMethodNameStr == null) {
+                chromiumMethodNameStr = "create";
+            }
+            Method staticFactory = factoryProviderClass.getMethod(chromiumMethodNameStr, delegateClass);
+            if (staticFactory!=null){
+                sProviderInstance = staticFactory.invoke(null, delegateConstructor.newInstance());
+            }
+        }
+
+        if (sProviderInstance != null){
+            field.set("sProviderInstance", sProviderInstance);
+            Log.i(HOOK_WEBVIEW_TAG,"Hook success!");
+        } else {
+            Log.i(HOOK_WEBVIEW_TAG,"Hook failed!");
+        }
+    } catch (Throwable e) {
+        Log.w(HOOK_WEBVIEW_TAG,e);
+    }
   }
 
   @Override
